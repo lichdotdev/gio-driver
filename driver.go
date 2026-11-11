@@ -3,26 +3,24 @@
 //
 // A Tour wraps the window's content with Layout and marks each widget a step
 // can point at with Anchor. The look is the application's: Spotlight styles
-// the scrim, and Popover draws the step, either DefaultPopover or the
-// application's own widget built from StepState.
+// the scrim, Motion times the animations, and Popover draws the step, either
+// DefaultPopover or the application's own widget built from StepState.
 package driver
 
 import (
 	"image"
+	"time"
 
 	"gioui.org/f32"
-	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
-	"gioui.org/op/clip"
-	"gioui.org/op/paint"
 	"gioui.org/widget"
 )
 
-// far bounds the scrim and the click blockers drawn in an anchor's
-// coordinates: past any window edge, whatever the anchor's offset.
+// far bounds the scrim and the click blockers: past any window edge,
+// whatever the offset they are drawn at.
 const far = 1 << 15
 
 // Step is one stop of a tour.
@@ -71,17 +69,22 @@ type StepState struct {
 type Tour struct {
 	Steps     []Step
 	Spotlight Spotlight
-	Popover   func(gtx layout.Context, s StepState) layout.Dimensions
+	// Motion times the animations; nil is DefaultMotion, and a zero Motion
+	// turns them off.
+	Motion  *Motion
+	Popover func(gtx layout.Context, s StepState) layout.Dimensions
 
 	active            bool
 	index             int
 	next, back, close widget.Clickable
 	pending           []Event
+	now               time.Time
 
 	window image.Point
-	// drawn is the current anchor laid out this frame; floating is its
-	// popover left for Layout to draw in the middle of the window.
-	drawn, floating bool
+	// drawn is the current anchor laid out this frame, and mode how the
+	// overlay is drawn this frame.
+	drawn bool
+	mode  mode
 
 	// root sees the pointer in window coordinates; measure[i] sees it in
 	// step i's anchor coordinates. Their difference is the anchor's window
@@ -92,6 +95,8 @@ type Tour struct {
 	block          int
 	pointer, local f32.Point
 	hasPtr, hasLoc bool
+
+	anim anim
 }
 
 // Start opens the tour at its first step.
@@ -99,13 +104,18 @@ func (t *Tour) Start() {
 	if len(t.Steps) == 0 {
 		return
 	}
-	t.active = true
+	t.active, t.index, t.hasLoc = true, 0, false
 	t.measure = make([]int, len(t.Steps))
-	t.goTo(0)
+	t.anim = anim{fresh: true}
 }
 
 // Stop closes the tour without an Event.
-func (t *Tour) Stop() { t.active = false }
+func (t *Tour) Stop() {
+	if t.active {
+		t.active = false
+		t.anim.exit(t.now)
+	}
+}
 
 // Active reports whether the tour is showing.
 func (t *Tour) Active() bool { return t.active }
@@ -125,6 +135,7 @@ func (t *Tour) Update(gtx layout.Context) (Event, bool) {
 }
 
 func (t *Tour) update(gtx layout.Context) {
+	t.now = gtx.Now
 	if !t.active {
 		return
 	}
@@ -145,18 +156,31 @@ func (t *Tour) update(gtx layout.Context) {
 	}
 }
 
-// escaped is Escape that no widget took. Gio hands a key event to the first
-// filter that asks for it in the frame, so Layout asks only after the
-// window's content: a focused editor or terminal keeps its own Escape.
-func (t *Tour) escaped(gtx layout.Context) bool {
-	esc := false
+// keys reads Escape, which closes the tour, and the arrows, which move it.
+// Gio hands a key event to the first filter that asks for it in the frame,
+// so Layout asks only after the window's content: a focused editor or
+// terminal keeps its own keys.
+func (t *Tour) keys(gtx layout.Context) {
 	for {
-		e, ok := gtx.Event(key.Filter{Name: key.NameEscape})
+		e, ok := gtx.Event(key.Filter{Name: key.NameEscape}, key.Filter{Name: key.NameRightArrow}, key.Filter{Name: key.NameLeftArrow})
 		if !ok {
-			return esc
+			return
 		}
-		if k, isKey := e.(key.Event); isKey && k.State == key.Press {
-			esc = true
+		k, isKey := e.(key.Event)
+		if !isKey || k.State != key.Press || !t.active {
+			continue
+		}
+		switch k.Name {
+		case key.NameEscape:
+			t.end(false)
+		case key.NameRightArrow:
+			if t.Steps[t.index].Until == nil {
+				t.advance()
+			}
+		case key.NameLeftArrow:
+			if t.canBack() {
+				t.goTo(t.index - 1)
+			}
 		}
 	}
 }
@@ -175,11 +199,20 @@ func (t *Tour) advance() {
 
 func (t *Tour) goTo(i int) {
 	t.index, t.hasLoc = i, false
+	t.anim.step(t.now)
 }
 
 func (t *Tour) end(completed bool) {
 	t.active = false
+	t.anim.exit(t.now)
 	t.pending = append(t.pending, Event{Completed: completed, Step: t.index})
+}
+
+func (t *Tour) motion() Motion {
+	if t.Motion == nil {
+		return DefaultMotion
+	}
+	return *t.Motion
 }
 
 // Layout lays out the window's content w with the tour over it. Call it at
@@ -187,27 +220,31 @@ func (t *Tour) end(completed bool) {
 func (t *Tour) Layout(gtx layout.Context, w layout.Widget) layout.Dimensions {
 	t.update(gtx)
 	t.window = gtx.Constraints.Max
-	t.drawn, t.floating = false, false
+	t.drawn, t.mode = false, modeCentered
 	if t.active {
+		t.anim.begin(t.now)
 		t.readPointer(gtx)
 	}
 	d := w(gtx)
-	if t.active && t.escaped(gtx) {
-		t.end(false)
-		gtx.Execute(op.InvalidateCmd{})
+	if t.active {
+		t.keys(gtx)
 	}
-	if !t.active {
+	t.anim.settle(t.now, t.motion())
+	if !t.active && !t.anim.exiting {
 		return d
 	}
-	m := op.Record(gtx.Ops)
-	switch {
-	case !t.drawn:
-		t.layoutCentered(gtx)
-	case t.floating:
-		t.layoutMiddle(gtx)
+	if t.active {
+		t.anim.show(t.mode, t.now, t.hasPtr)
 	}
-	t.watch(gtx)
+	m := op.Record(gtx.Ops)
+	t.layoutOverlay(gtx)
+	if t.active {
+		t.watch(gtx)
+	}
 	op.Defer(gtx.Ops, m.Stop())
+	if t.anim.running(t.now, t.motion()) {
+		gtx.Execute(op.InvalidateCmd{})
+	}
 	return d
 }
 
@@ -219,22 +256,30 @@ func (t *Tour) Anchor(gtx layout.Context, id string, w layout.Widget) layout.Dim
 		return d
 	}
 	t.drawn = true
-	m := op.Record(gtx.Ops)
-	t.layoutSpotlight(gtx, d.Size)
-	op.Defer(gtx.Ops, m.Stop())
+	hole := image.Rectangle{Max: d.Size}.Inset(-gtx.Dp(t.Spotlight.orDefault().Padding))
+	switch o, ok := t.origin(); {
+	case ok:
+		t.mode = modeWindow
+		t.anim.aim(hole.Add(o), t.now, t.motion())
+	case t.anim.pending(t.hasPtr, t.now):
+		t.mode = modePending
+	default:
+		t.mode = modeLocal
+		t.layoutLocal(gtx, hole)
+	}
+	t.deferMeasure(gtx)
 	return d
 }
 
 func (t *Tour) readPointer(gtx layout.Context) {
 	const kinds = pointer.Enter | pointer.Leave | pointer.Move | pointer.Drag | pointer.Press | pointer.Release
-	all := pointer.ScrollRange{Min: -far, Max: far}
 	for {
 		e, ok := gtx.Event(pointer.Filter{Target: &t.root, Kinds: kinds})
 		if !ok {
 			break
 		}
-		if p, isPtr := e.(pointer.Event); isPtr && p.Kind != pointer.Leave {
-			t.pointer, t.hasPtr = p.Position, true
+		if p, isPtr := e.(pointer.Event); isPtr {
+			t.pointer, t.hasPtr = p.Position, p.Kind != pointer.Leave
 		}
 	}
 	for {
@@ -246,6 +291,7 @@ func (t *Tour) readPointer(gtx layout.Context) {
 			t.local, t.hasLoc = p.Position, true
 		}
 	}
+	all := pointer.ScrollRange{Min: -far, Max: far}
 	for {
 		if _, ok := gtx.Event(pointer.Filter{Target: &t.block, Kinds: pointer.Press | pointer.Release | pointer.Scroll, ScrollX: all, ScrollY: all}); !ok {
 			break
@@ -262,82 +308,6 @@ func (t *Tour) origin() (image.Point, bool) {
 	return t.pointer.Sub(t.local).Round(), true
 }
 
-// layoutSpotlight draws, in the anchor's coordinates, the scrim with its
-// hole, the blockers around the hole and the popover.
-func (t *Tour) layoutSpotlight(gtx layout.Context, size image.Point) {
-	sp := t.Spotlight.orDefault()
-	hole := image.Rectangle{Max: size}.Inset(-gtx.Dp(sp.Padding))
-	paintScrim(gtx, sp, scrimPath(gtx.Ops, hole, gtx.Dp(sp.Radius)))
-	for _, r := range around(hole) {
-		a := clip.Rect(r).Push(gtx.Ops)
-		event.Op(gtx.Ops, &t.block)
-		a.Pop()
-	}
-	// Without the anchor's window position nothing keeps the popover inside
-	// the window, so it waits in the middle until the pointer is seen.
-	if o, ok := t.origin(); ok {
-		popover, size2 := t.recordPopover(gtx)
-		window := image.Rectangle{Max: t.window}
-		box, _ := place(t.Steps[t.index].Side, hole.Add(o), size2, window, gtx.Dp(sp.Offset), gtx.Dp(sp.Margin))
-		off := op.Offset(box.Min.Sub(o)).Push(gtx.Ops)
-		popover.Add(gtx.Ops)
-		off.Pop()
-	} else {
-		t.floating = true
-	}
-	// Deferred again so it lands above a floating popover too, which Layout
-	// defers after this; a popover under the pointer would hide it.
-	m := op.Record(gtx.Ops)
-	t.measureHere(gtx)
-	op.Defer(gtx.Ops, m.Stop())
-}
-
-// layoutCentered is a step without an anchor on screen: a full scrim and the
-// popover in the middle of the window.
-func (t *Tour) layoutCentered(gtx layout.Context) {
-	sp := t.Spotlight.orDefault()
-	window := image.Rectangle{Max: t.window}
-	paintScrim(gtx, sp, clip.Rect(window).Path())
-	a := clip.Rect(window).Push(gtx.Ops)
-	event.Op(gtx.Ops, &t.block)
-	a.Pop()
-	t.layoutMiddle(gtx)
-}
-
-// layoutMiddle draws the popover in the middle of the window.
-func (t *Tour) layoutMiddle(gtx layout.Context) {
-	popover, size := t.recordPopover(gtx)
-	off := op.Offset(t.window.Sub(size).Div(2)).Push(gtx.Ops)
-	popover.Add(gtx.Ops)
-	off.Pop()
-}
-
-// measureHere lays a pass-through area over everything in the anchor's
-// coordinates, so the anchor learns where the pointer is wherever it is.
-func (t *Tour) measureHere(gtx layout.Context) {
-	defer pointer.PassOp{}.Push(gtx.Ops).Pop()
-	defer clip.Rect{Min: image.Pt(-far, -far), Max: image.Pt(far, far)}.Push(gtx.Ops).Pop()
-	event.Op(gtx.Ops, &t.measure[t.index])
-}
-
-// watch is measureHere's counterpart in window coordinates.
-func (t *Tour) watch(gtx layout.Context) {
-	defer pointer.PassOp{}.Push(gtx.Ops).Pop()
-	defer clip.Rect{Max: t.window}.Push(gtx.Ops).Pop()
-	event.Op(gtx.Ops, &t.root)
-}
-
-func (t *Tour) recordPopover(gtx layout.Context) (op.CallOp, image.Point) {
-	if t.Popover == nil {
-		return op.CallOp{}, image.Point{}
-	}
-	m := op.Record(gtx.Ops)
-	g := gtx
-	g.Constraints = layout.Constraints{Max: t.window}
-	d := t.Popover(g, t.state())
-	return m.Stop(), d.Size
-}
-
 func (t *Tour) state() StepState {
 	s := t.Steps[t.index]
 	return StepState{
@@ -345,44 +315,4 @@ func (t *Tour) state() StepState {
 		Waiting: s.Until != nil, CanBack: t.canBack(), Last: t.index == len(t.Steps)-1,
 		Next: &t.next, Back: &t.back, Close: &t.close,
 	}
-}
-
-func paintScrim(gtx layout.Context, sp Spotlight, path clip.PathSpec) {
-	defer clip.Outline{Path: path}.Op().Push(gtx.Ops).Pop()
-	paint.ColorOp{Color: sp.Scrim}.Add(gtx.Ops)
-	paint.PaintOp{}.Add(gtx.Ops)
-}
-
-// around is everything outside the hole, as four rectangles.
-func around(h image.Rectangle) [4]image.Rectangle {
-	return [4]image.Rectangle{
-		{Min: image.Pt(-far, -far), Max: image.Pt(far, h.Min.Y)},
-		{Min: image.Pt(-far, h.Max.Y), Max: image.Pt(far, far)},
-		{Min: image.Pt(-far, h.Min.Y), Max: image.Pt(h.Min.X, h.Max.Y)},
-		{Min: image.Pt(h.Max.X, h.Min.Y), Max: image.Pt(far, h.Max.Y)},
-	}
-}
-
-// scrimPath is everything with the rounded hole cut out, the hole wound
-// against the outside.
-func scrimPath(ops *op.Ops, h image.Rectangle, radius int) clip.PathSpec {
-	x0, y0, x1, y1 := float32(h.Min.X), float32(h.Min.Y), float32(h.Max.X), float32(h.Max.Y)
-	r := min(float32(radius), (x1-x0)/2, (y1-y0)/2)
-	var p clip.Path
-	p.Begin(ops)
-	p.MoveTo(f32.Pt(-far, -far))
-	p.LineTo(f32.Pt(far, -far))
-	p.LineTo(f32.Pt(far, far))
-	p.LineTo(f32.Pt(-far, far))
-	p.Close()
-	p.MoveTo(f32.Pt(x0+r, y0))
-	p.QuadTo(f32.Pt(x0, y0), f32.Pt(x0, y0+r))
-	p.LineTo(f32.Pt(x0, y1-r))
-	p.QuadTo(f32.Pt(x0, y1), f32.Pt(x0+r, y1))
-	p.LineTo(f32.Pt(x1-r, y1))
-	p.QuadTo(f32.Pt(x1, y1), f32.Pt(x1, y1-r))
-	p.LineTo(f32.Pt(x1, y0+r))
-	p.QuadTo(f32.Pt(x1, y0), f32.Pt(x1-r, y0))
-	p.Close()
-	return p.End()
 }

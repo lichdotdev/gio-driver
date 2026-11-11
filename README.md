@@ -7,6 +7,8 @@ popover beside it that walks the person through the steps.
 It is built for [lich](https://github.com/lichdotdev/lich), its first user, and works on
 plain `gioui.org`.
 
+![A tour over the Notebook example](docs/demo.gif)
+
 ```sh
 go get github.com/lichdotdev/gio-driver
 ```
@@ -42,7 +44,7 @@ tour.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 })
 ```
 
-`examples/basic` is a runnable window: `go run ./examples/basic`.
+`examples/notebook` is the window above: `go run ./examples/notebook`.
 
 ## How it behaves
 
@@ -50,10 +52,20 @@ tour.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 - **`Until` holds a step** until the person does its action through the hole: the popover
   shows no Next, and Back is not offered into a step that cannot be undone.
 - **The popover flips and shifts** to stay inside the window, like a tooltip.
-- **Escape closes the tour** unless a focused widget takes it first, so a focused editor
-  or terminal keeps its own Escape.
+- **Escape closes the tour, and the arrows move it**, unless a focused widget takes the
+  key first: a focused editor or terminal keeps its own keys.
 - **A step whose anchor is not on screen** shows the popover in the middle of the window
   over a full scrim.
+
+## Motion
+
+The scrim fades in, the hole glides from one anchor to the next, and each popover slides
+in once the hole lands. `Tour.Motion` times it: nil is `DefaultMotion`, and a zero
+`Motion` turns every animation off.
+
+```go
+tour.Motion = &driver.Motion{Enter: 160 * time.Millisecond, Exit: 180 * time.Millisecond, Glide: 260 * time.Millisecond}
+```
 
 ## Your design system
 
@@ -73,8 +85,9 @@ tour.Popover = func(gtx layout.Context, s driver.StepState) layout.Dimensions {
 - Gio does not tell a widget where it is in the window. The tour learns it from the
   pointer, so until the pointer has been inside the window, the popover waits in the
   middle of the window, with the hole already over its anchor, and moves beside the
-  anchor at the first pointer event. A window that resizes under a still pointer keeps
-  the old position until the pointer moves.
+  anchor at the first pointer event. Without that position the hole cannot glide, so it
+  jumps. A window that resizes under a still pointer keeps the old position until the
+  pointer moves.
 - The hole is not clipped by the anchor's parent: a widget half scrolled out of a list
   gets a hole over its full size. Scroll the anchor into view before its step.
 - Gio blends in linear light, so a scrim's alpha reads lighter than the same value in a

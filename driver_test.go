@@ -4,6 +4,7 @@ import (
 	"image"
 	"image/color"
 	"testing"
+	"time"
 
 	"gioui.org/f32"
 	"gioui.org/io/event"
@@ -19,6 +20,7 @@ import (
 )
 
 const (
+	frameTime  = 16 * time.Millisecond
 	winW, winH = 600, 400
 	popW, popH = 120, 40
 )
@@ -32,6 +34,7 @@ var (
 
 type scene struct {
 	r      input.Router
+	clock  time.Time
 	ops    op.Ops
 	tour   Tour
 	a, b   widget.Clickable
@@ -47,8 +50,10 @@ type scene struct {
 }
 
 func newScene(steps ...Step) *scene {
-	s := &scene{}
+	s := &scene{clock: time.Unix(1_000_000, 0)}
 	s.tour.Steps = steps
+	// Instant, so a click lands where the popover ends up; motion_test.go times the animations.
+	s.tour.Motion = &Motion{}
 	// The popover is all Next, so a click on it advances.
 	s.tour.Popover = func(gtx layout.Context, st StepState) layout.Dimensions {
 		s.last = st
@@ -68,7 +73,8 @@ func fill(gtx layout.Context, c color.NRGBA, size image.Point) layout.Dimensions
 
 func (s *scene) frame() {
 	s.ops.Reset()
-	gtx := layout.Context{Ops: &s.ops, Metric: unit.Metric{PxPerDp: 1, PxPerSp: 1}, Constraints: layout.Exact(image.Pt(winW, winH)), Source: s.r.Source()}
+	s.clock = s.clock.Add(frameTime)
+	gtx := layout.Context{Now: s.clock, Ops: &s.ops, Metric: unit.Metric{PxPerDp: 1, PxPerSp: 1}, Constraints: layout.Exact(image.Pt(winW, winH)), Source: s.r.Source()}
 	for {
 		e, ok := s.tour.Update(gtx)
 		if !ok {
@@ -119,6 +125,13 @@ func (s *scene) layoutFocus(gtx layout.Context) {
 	if !s.focusOnce {
 		gtx.Execute(key.FocusCmd{Tag: &s.focusTag})
 		s.focusOnce = true
+	}
+}
+
+// wait runs frames until d has passed.
+func (s *scene) wait(d time.Duration) {
+	for end := s.clock.Add(d); s.clock.Before(end); {
+		s.frame()
 	}
 }
 
@@ -222,12 +235,12 @@ func TestPopoverWithoutAPointerUsesItsSide(t *testing.T) {
 func TestPopoverWaitsInTheMiddleUntilThePointerIsSeen(t *testing.T) {
 	s := newScene(Step{Anchor: "a", Side: Bottom})
 	s.start()
-	if !s.tour.floating {
+	if s.tour.anim.last != modeLocal || s.tour.hasPtr {
 		t.Fatal("with no pointer seen, the popover is not in the middle of the window")
 	}
 	// Resting on the middle popover must not hide the pointer from the anchor.
 	s.move(image.Pt(winW/2, winH/2))
-	if s.tour.floating {
+	if s.tour.anim.last != modeWindow {
 		t.Fatal("the pointer over the middle popover did not place it")
 	}
 	s.click(image.Pt(center(posA).X, posA.Y+sizeW.Y+6+8+popH/2))
@@ -318,6 +331,35 @@ func TestEscapeStaysWithAFocusedWidget(t *testing.T) {
 	}
 	if s.focusEsc != 1 {
 		t.Fatalf("focused widget got %d Escapes, want 1", s.focusEsc)
+	}
+}
+
+func TestArrowsMoveTheTour(t *testing.T) {
+	done := false
+	s := newScene(Step{Anchor: "a"}, Step{Anchor: "b"}, Step{Anchor: "a", Until: func() bool { return done }}, Step{Anchor: "b"})
+	press := func(name key.Name) {
+		s.r.Queue(key.Event{Name: name, State: key.Press})
+		s.settle()
+	}
+	s.start()
+	press(key.NameRightArrow)
+	press(key.NameRightArrow)
+	if s.tour.Index() != 2 {
+		t.Fatalf("index = %d after two Rights, want 2", s.tour.Index())
+	}
+	press(key.NameRightArrow)
+	if s.tour.Index() != 2 {
+		t.Fatal("Right skipped a step that waits on Until")
+	}
+	press(key.NameLeftArrow)
+	if s.tour.Index() != 1 {
+		t.Fatalf("index = %d after Left, want 1", s.tour.Index())
+	}
+	done = true
+	press(key.NameRightArrow)
+	press(key.NameLeftArrow)
+	if s.tour.Index() != 3 {
+		t.Fatalf("index = %d, want Left not to go back into a step whose action is done", s.tour.Index())
 	}
 }
 
