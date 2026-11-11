@@ -386,6 +386,20 @@ func TestPauseHidesTheTourAndKeepsItsStep(t *testing.T) {
 	}
 }
 
+func TestGoToShowsAStepOfAnActiveTour(t *testing.T) {
+	s := newScene(Step{Anchor: "a"}, Step{Anchor: "b"}, Step{Anchor: "a"})
+	s.tour.GoTo(1)
+	if s.tour.Active() {
+		t.Fatal("GoTo started a tour that was not running")
+	}
+	s.start()
+	s.tour.GoTo(2)
+	s.tour.GoTo(7)
+	if s.tour.Index() != 2 {
+		t.Fatalf("index = %d, want 2 and an out-of-range GoTo ignored", s.tour.Index())
+	}
+}
+
 func TestCloseEndsEarly(t *testing.T) {
 	s := newScene(Step{Anchor: "a"}, Step{Anchor: "b"})
 	s.start()

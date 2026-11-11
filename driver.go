@@ -129,6 +129,14 @@ func (t *Tour) Resume() {
 	}
 }
 
+// GoTo shows step i of an active tour, for an application that sends it
+// back to the step that opens a menu or dialog the person closed early.
+func (t *Tour) GoTo(i int) {
+	if t.active && i >= 0 && i < len(t.Steps) && i != t.index {
+		t.goTo(i)
+	}
+}
+
 // Active reports whether the tour is showing.
 func (t *Tour) Active() bool { return t.active }
 
