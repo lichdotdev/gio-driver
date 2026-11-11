@@ -363,6 +363,29 @@ func TestArrowsMoveTheTour(t *testing.T) {
 	}
 }
 
+func TestPauseHidesTheTourAndKeepsItsStep(t *testing.T) {
+	s := newScene(Step{Anchor: "a"}, Step{Anchor: "b"})
+	s.start()
+	s.tour.goTo(1)
+	s.tour.Pause()
+	s.settle()
+	s.click(center(posA))
+	if s.hitsA != 1 {
+		t.Fatalf("a paused tour blocked a click: hits = %d", s.hitsA)
+	}
+	s.r.Queue(key.Event{Name: key.NameEscape, State: key.Press})
+	s.settle()
+	if !s.tour.Active() {
+		t.Fatal("Escape closed a paused tour")
+	}
+	s.tour.Resume()
+	s.settle()
+	s.click(center(posA))
+	if s.hitsA != 1 || s.tour.Index() != 1 {
+		t.Fatalf("after Resume: hits = %d, index = %d; want the click blocked on step 1", s.hitsA, s.tour.Index())
+	}
+}
+
 func TestCloseEndsEarly(t *testing.T) {
 	s := newScene(Step{Anchor: "a"}, Step{Anchor: "b"})
 	s.start()

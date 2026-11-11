@@ -54,10 +54,15 @@ type anim struct {
 	last               mode
 }
 
-// begin stamps a tour started between frames with the first frame's time.
+// begin stamps a tour started or resumed between frames with the first
+// frame's time; a popover that was showing comes back in with the scrim.
 func (a *anim) begin(now time.Time) {
-	if a.fresh {
-		a.fresh, a.shownAt, a.stepAt = false, now, now
+	if !a.fresh {
+		return
+	}
+	a.fresh, a.shownAt, a.stepAt = false, now, now
+	if !a.popAt.IsZero() {
+		a.popAt = now
 	}
 }
 

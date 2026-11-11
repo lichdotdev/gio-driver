@@ -54,6 +54,8 @@ tour.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 - **The popover flips and shifts** to stay inside the window, like a tooltip.
 - **Escape closes the tour, and the arrows move it**, unless a focused widget takes the
   key first: a focused editor or terminal keeps its own keys.
+- **`Pause` hides the tour** and lets everything through, keeping its step, for a dialog
+  that opens over the window; `Resume` fades it back in.
 - **A step whose anchor is not on screen** shows the popover in the middle of the window
   over a full scrim.
 

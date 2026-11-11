@@ -74,7 +74,7 @@ type Tour struct {
 	Motion  *Motion
 	Popover func(gtx layout.Context, s StepState) layout.Dimensions
 
-	active            bool
+	active, paused    bool
 	index             int
 	next, back, close widget.Clickable
 	pending           []Event
@@ -114,6 +114,18 @@ func (t *Tour) Stop() {
 	if t.active {
 		t.active = false
 		t.anim.exit(t.now)
+	}
+}
+
+// Pause hides the tour and lets every click and key through, keeping its
+// step: for a dialog that opens over the window mid-tour.
+func (t *Tour) Pause() { t.paused = true }
+
+// Resume shows a paused tour again, fading it back in.
+func (t *Tour) Resume() {
+	if t.paused {
+		t.paused = false
+		t.anim.fresh = true
 	}
 }
 
@@ -218,6 +230,10 @@ func (t *Tour) motion() Motion {
 // Layout lays out the window's content w with the tour over it. Call it at
 // the window's origin, with the window's size as the maximum constraint.
 func (t *Tour) Layout(gtx layout.Context, w layout.Widget) layout.Dimensions {
+	if t.paused {
+		t.now = gtx.Now
+		return w(gtx)
+	}
 	t.update(gtx)
 	t.window = gtx.Constraints.Max
 	t.drawn, t.mode = false, modeCentered
@@ -252,7 +268,7 @@ func (t *Tour) Layout(gtx layout.Context, w layout.Widget) layout.Dimensions {
 // it. id names the widget for Step.Anchor.
 func (t *Tour) Anchor(gtx layout.Context, id string, w layout.Widget) layout.Dimensions {
 	d := w(gtx)
-	if !t.active || t.drawn || id == "" || t.Steps[t.index].Anchor != id {
+	if !t.active || t.paused || t.drawn || id == "" || t.Steps[t.index].Anchor != id {
 		return d
 	}
 	t.drawn = true
